@@ -39,3 +39,10 @@ jobs:
           SERVER3_SEND_KEY: ${{ secrets.SERVER3_SEND_KEY }} # ServerChan3
         run: |
           python auto_checkin.py
+  workflow-keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: liskin/gh-workflow-keepalive@v1
