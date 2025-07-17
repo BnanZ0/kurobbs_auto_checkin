@@ -1,5 +1,6 @@
 import os
 import sys
+import hashlib, time, random
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -27,19 +28,43 @@ class KurobbsClient:
     FIND_ROLE_LIST_API_URL = "https://api.kurobbs.com/user/role/findRoleList"
     SIGN_URL = "https://api.kurobbs.com/encourage/signIn/v2"
     USER_SIGN_URL = "https://api.kurobbs.com/user/signIn"
+    FORUM_LIST_URL = "https://api.kurobbs.com/forum/list"
+    LIKE_URL = "https://api.kurobbs.com/forum/like"
+    GET_POST_DETAIL_URL = "https://api.kurobbs.com/forum/getPostDetail"
+    SHARE_TASK_URL = "https://api.kurobbs.com/encourage/level/shareTask"
 
-    def __init__(self, token: str):
+    def __init__(self, token: str, uid: str):
+        self.uid = uid
         self.token = token
         self.result: Dict[str, str] = {}
         self.exceptions: List[Exception] = []
+        self.devcode = self.generate_fixed_string(uid)
+        self.ip = "10.0.2.2" + uid[-2:]
+
+    def generate_fixed_string(self, input_string, length=40):
+        if not input_string:
+            logger.warning("生成固定字符串输入为空, 使用默认值 1")
+            input_string = "1"
+        
+        input_string = str(input_string)
+
+        if length > 64:
+            logger.warning(f"使用 {input_string} 生成长度 {length} 超过最大值, 已自动调整为64")
+            length = 64
+
+        sha256_hash = hashlib.sha256(input_string.encode('utf-8')).hexdigest().upper()
+        fixed_string = sha256_hash[:length]
+
+        logger.debug(f"使用 {input_string} 生成长度为 {length} 的固定字符串 {fixed_string}")
+        return fixed_string
 
     def get_headers(self) -> Dict[str, str]:
         """Get the headers required for API requests."""
         return {
             "osversion": "Android",
-            "devcode": "2fba3859fe9bfe9099f2696b8648c2c6",
+            "devcode": self.devcode,
             "countrycode": "CN",
-            "ip": "10.0.2.233",
+            "ip": self.ip,
             "model": "2211133C",
             "source": "android",
             "lang": "zh-Hans",
@@ -64,6 +89,108 @@ class KurobbsClient:
         data = {"gameId": game_id}
         res = self.make_request(self.FIND_ROLE_LIST_API_URL, data)
         return res.data
+    
+    def get_forum_list(self) -> Response:
+        """Perform the get_forum_list operation."""
+        user_game_list = self.get_user_game_list(3)
+        gameId = user_game_list[0].get("gameId", 2)
+        forumId = 2 if gameId == 2 else 9
+        data = {
+            "forumId": forumId,
+            "gameId": gameId,
+            "pageIndex": 1,
+            "pageSize": 20,
+            "searchType": 2,
+            "timeType": 0,
+            "topicId": 0,
+        }
+        return self.make_request(self.FORUM_LIST_URL, data)
+    
+    def get_post_detail(self, rsp_forumList: Response, post_index: int) -> Response:
+        """Perform the get_post_detail operation."""
+        data = {
+            "isOnlyPublisher": 0,
+            "postId": rsp_forumList.data["postList"][post_index]["postId"],
+            "showOrderType": 2,
+        }
+        return self.make_request(self.GET_POST_DETAIL_URL, data)
+    
+    def like_post(self, rsp_PostDetail: Response, operateType: int=1) -> Response:
+        """Perform the like_post operation."""
+        data = {
+            "forumId": rsp_PostDetail.data["postDetail"]["gameForumId"],
+            "gameId": rsp_PostDetail.data["gameId"],
+            "likeType": 1,
+            "operateType": operateType,
+            "postCommentId": 0,
+            "postCommentReplyId": 0,
+            "postId": rsp_PostDetail.data["postDetail"]["id"],
+            "postType": rsp_PostDetail.data["postDetail"]["postType"],
+            "toUserId": rsp_PostDetail.data["postDetail"]["postUserId"],
+        }
+        return self.make_request(self.LIKE_URL, data)
+    
+    def share_post(self, rsp_PostDetail: Response) -> Response:
+        """Perform the share_post operation."""
+        data = {
+            "gameId": rsp_PostDetail.data["gameId"],
+        }
+        return self.make_request(self.SHARE_TASK_URL, data)
+    
+    def forum_task(self):
+        """Perform the forum_task operation."""
+        rsp_forumList = self.get_forum_list()
+        if not rsp_forumList.success:
+            failure_message = '获取帖子列表失败'
+            self.exceptions.append(KurobbsClientException(f'{failure_message}, {rsp_forumList.msg}'))
+            return
+        self.result['get_forum_list'] = '获取帖子列表成功'
+        success = 0
+        for i in range(0, 5):
+            rsp_getPostDetail = self.get_post_detail(rsp_forumList, i)
+            if rsp_getPostDetail.success:
+                success += 1
+            time.sleep(random.uniform(1.0, 2.0))
+            if success >= 3:
+                break
+        else:
+            failure_message = '获取帖子详情失败'
+            self.exceptions.append(KurobbsClientException(f'{failure_message}, {rsp_getPostDetail.msg}'))
+            return
+        self.result['get_post_detail'] = '获取帖子详情成功'
+        success = 0
+        for _ in range(0, 1):
+            rsp_share_post = self.share_post(rsp_getPostDetail)
+            if rsp_share_post.success:
+                success += 1
+            time.sleep(random.uniform(1.0, 2.0))
+            if success >= 1:
+                break
+        else:
+            failure_message = '分享帖子失败'
+            self.exceptions.append(KurobbsClientException(f'{failure_message}, {rsp_share_post.msg}'))
+            return
+        self.result['share_post'] = '分享帖子成功'
+        like_post = True
+        success = 0
+        for _ in range(0, 9):
+            if like_post:
+                rsp_like_post = self.like_post(rsp_getPostDetail, 1)
+            if rsp_like_post.success:
+                time.sleep(random.uniform(1.0, 2.0))
+                like_post = False
+                rsp_dislike_post = self.like_post(rsp_getPostDetail, 2)
+                if rsp_dislike_post.success:
+                    success += 1
+                    like_post = True
+            time.sleep(random.uniform(1.0, 2.0))
+            if success >= 5:
+                break
+        else:
+            failure_message = '点赞帖子失败'
+            self.exceptions.append(KurobbsClientException(f'{failure_message}, {rsp_like_post.msg}'))
+            return
+        self.result['rsp_like_post'] = '点赞帖子成功'
 
     def checkin(self) -> Response:
         """Perform the check-in operation."""
@@ -122,6 +249,8 @@ class KurobbsClient:
             success_message="社区签到成功",
             failure_message="社区签到失败",
         )
+        
+        self.forum_task()
 
         self._log()
 
@@ -146,12 +275,13 @@ def configure_logger(debug: bool = False):
 
 def main():
     """Main function to handle command-line arguments and start the sign-in process."""
+    uid = os.getenv("UID")
     token = os.getenv("TOKEN")
     debug = os.getenv("DEBUG", False)
     configure_logger(debug=debug)
 
     try:
-        kurobbs = KurobbsClient(token)
+        kurobbs = KurobbsClient(token, uid)
         kurobbs.start()
         if kurobbs.msg:
             send_notification(kurobbs.msg)
@@ -160,7 +290,7 @@ def main():
         send_notification(str(e))
         sys.exit(1)
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
+        logger.exception("An unexpected error occurred:")
         sys.exit(1)
 
 
